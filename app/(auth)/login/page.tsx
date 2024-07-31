@@ -4,6 +4,7 @@ import React from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { signIn } from 'next-auth/react';
+import Image from 'next/image';
 
 export default function LoginPage() {
 	const handleSignIn = (provider: string) => {
@@ -12,8 +13,9 @@ export default function LoginPage() {
 
 	return (
 		<div className='flex min-h-screen bg-[#020817] text-white'>
-			<div className='flex-1 flex items-center justify-center'>
-				<h1 className='text-2xl font-bold'>Bonkend</h1>
+			<div className='flex-1 flex items-center justify-center space-x-5'>
+				<Image src='/logo.svg' width={220} height={170} alt='Bonkend' />
+				<h1 className='text-5xl font-bold'>Bonkend.</h1>
 			</div>
 			<div className='flex-1 flex items-center justify-center'>
 				<Card className='w-[350px] bg-gray-800 border-gray-700'>
