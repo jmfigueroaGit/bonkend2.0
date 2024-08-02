@@ -13,6 +13,7 @@ import { Form, FormField, FormItem, FormLabel, FormControl, FormMessage } from '
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { toast } from '@/components/ui/use-toast';
+import { Loader2 } from 'lucide-react';
 
 type FormValues = {
 	name: string;
@@ -131,7 +132,11 @@ export default function EditDatabasePage({ params }: { params: { id: string } })
 	});
 
 	if (isLoading) {
-		return <div>Loading...</div>;
+		return (
+			<div className='flex justify-center items-center h-64'>
+				<Loader2 className='h-8 w-8 animate-spin' />
+			</div>
+		);
 	}
 
 	return (

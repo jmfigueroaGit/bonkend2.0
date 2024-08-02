@@ -1,7 +1,7 @@
 // lib/actions/tableActions.ts
 
 'use server';
-
+import { MongoClient } from 'mongodb';
 import prisma from '@/lib/prisma';
 import { getDatabaseById } from '@/lib/api/actions/database';
 import { executeQuery } from '@/lib/api/utils/databaseUtils';
@@ -10,6 +10,16 @@ import { z } from 'zod';
 import { v4 as uuidv4 } from 'uuid';
 import { createId } from '@paralleldrive/cuid2';
 import { MongoTableSchema, SqlTableSchema } from '@/lib/schemas';
+import { decrypt } from '../utils/encryption';
+import { createApiEndpoints } from './api';
+import { Table, Column, Database } from '@prisma/client';
+
+type TableWithRelations = Table & {
+	columns: Column[];
+	database: Database;
+};
+
+type TableResult = { success: true; table: TableWithRelations } | { success: false; error: string };
 
 const ColumnSchema = z.object({
 	name: z.string().min(1, 'Column name is required'),
@@ -62,9 +72,10 @@ export async function createTable(
 		let tableId;
 
 		if (database.type === 'mongodb') {
-			const { name, columns } = MongoTableSchema.parse(tableData);
+			const { name } = MongoTableSchema.parse(tableData);
 			query = `db.createCollection("${name}")`;
 			tableId = uuidv4(); // We'll use this as our internal ID, not in MongoDB
+			console.log('MongoDB query:', query);
 		} else {
 			const { name, idType, columns } = SqlTableSchema.parse(tableData);
 			const idColumn = getIdColumnDefinition(database.type, idType);
@@ -87,7 +98,6 @@ export async function createTable(
 			}
 		}
 
-		// Execute the query on the client's database
 		await executeQuery(database, query);
 
 		// Store the table information in our database
@@ -105,11 +115,14 @@ export async function createTable(
 					})),
 				},
 			},
-			include: { columns: true },
+			include: { columns: true, database: true },
 		});
 
+		// Generate API endpoints for the new table
+		const apiEndpoints = await createApiEndpoints(table.databaseId, table.id);
+
 		revalidatePath(`/dashboard/databases/${databaseId}/tables`);
-		return { success: true, table };
+		return { success: true, table, apiEndpoints };
 	} catch (error: any) {
 		console.error('Failed to create table:', error);
 		return { error: error.message, status: 500 };
@@ -118,43 +131,123 @@ export async function createTable(
 
 export async function updateTable(databaseId: string, tableId: string, tableData: z.infer<typeof TableSchema>) {
 	try {
-		const { name, columns } = TableSchema.parse(tableData);
-
-		const database: any = await getDatabaseById(databaseId);
-		if ('error' in database) {
-			throw new Error(database.error);
-		}
-
-		const existingTable = await prisma.table.findUnique({
-			where: { id: tableId },
-			include: { columns: true },
+		const existingTable: any = await prisma.table.findUnique({
+			where: { id: tableId, databaseId },
+			include: { database: true, columns: true },
 		});
 
 		if (!existingTable) {
-			throw new Error('Table not found');
+			return { error: 'Table not found', status: 404 };
 		}
 
-		let queries = [];
-		if (database.type !== 'mongodb') {
-			// Generate ALTER TABLE queries for SQL databases
+		const { name, columns } = tableData;
+
+		let decryptedCredentials;
+
+		try {
+			decryptedCredentials = decrypt(JSON.parse(existingTable.database.credentials as string));
+		} catch (error) {
+			console.error('Error decrypting database credentials:', error);
+			return { error: 'Failed to decrypt database credentials', status: 500 };
+		}
+
+		if (existingTable.database.type === 'mongodb') {
+			// For MongoDB, update the stored schema in the database
+			const updatedTable = await prisma.table.update({
+				where: { id: tableId },
+				data: {
+					name,
+					columns: {
+						deleteMany: {},
+						create: columns.map((col) => ({
+							name: col.name,
+							dataType: col.dataType,
+							isNullable: col.isNullable,
+							defaultValue: col.defaultValue,
+						})),
+					},
+				},
+				include: { columns: true },
+			});
+
+			// Optionally update the MongoDB collection schema
+			const client = new MongoClient(decryptedCredentials.mongoUri);
+			try {
+				await client.connect();
+				const db = client.db();
+				await db.command({
+					collMod: existingTable.name,
+					validator: {
+						$jsonSchema: {
+							bsonType: 'object',
+							required: columns.filter((col) => !col.isNullable).map((col) => col.name),
+							properties: columns.reduce(
+								(acc, col) => ({
+									...acc,
+									[col.name]: { bsonType: mapMongoDBType(col.dataType) },
+								}),
+								{}
+							),
+						},
+					},
+				});
+			} finally {
+				await client.close();
+			}
+
+			return { success: true, table: updatedTable };
+		} else {
+			// Generate ALTER TABLE queries based on the differences
+			const queries = [];
+
 			if (name !== existingTable.name) {
 				queries.push(`ALTER TABLE ${existingTable.name} RENAME TO ${name}`);
 			}
 
-			const existingColumns = new Set(existingTable.columns.map((col) => col.name));
+			const existingColumns = new Set(existingTable.columns.map((col: any) => col.name));
 			const newColumns = new Set(columns.map((col) => col.name));
 
 			// Add new columns
 			for (const col of columns) {
 				if (!existingColumns.has(col.name)) {
 					queries.push(
-						`ALTER TABLE ${name} ADD COLUMN ${col.name} ${mapDataType(database.type, col.dataType)}${
+						`ALTER TABLE ${name} ADD COLUMN ${col.name} ${mapDataType(existingTable.database.type, col.dataType)}${
 							col.isNullable ? '' : ' NOT NULL'
 						}${col.defaultValue ? ` DEFAULT ${col.defaultValue}` : ''}`
 					);
 				}
 			}
 
+			// Modify existing columns
+			for (const col of columns) {
+				if (existingColumns.has(col.name)) {
+					const existingCol: any = existingTable.columns.find((c: any) => c.name === col.name);
+					if (
+						existingCol.dataType !== col.dataType ||
+						existingCol.isNullable !== col.isNullable ||
+						existingCol.defaultValue !== col.defaultValue
+					) {
+						if (existingTable.database.type === 'postgresql') {
+							queries.push(
+								`ALTER TABLE ${name} ALTER COLUMN ${col.name} TYPE ${mapDataType(
+									existingTable.database.type,
+									col.dataType
+								)}${col.isNullable ? ' DROP NOT NULL' : ' SET NOT NULL'}${
+									col.defaultValue ? `, ALTER COLUMN ${col.name} SET DEFAULT ${col.defaultValue}` : ''
+								}`
+							);
+						} else {
+							// MySQL
+							queries.push(
+								`ALTER TABLE ${name} MODIFY COLUMN ${col.name} ${mapDataType(
+									existingTable.database.type,
+									col.dataType
+								)}${col.isNullable ? '' : ' NOT NULL'}${col.defaultValue ? ` DEFAULT ${col.defaultValue}` : ''}`
+							);
+						}
+					}
+				}
+			}
 			// Drop removed columns
 			for (const col of existingTable.columns) {
 				if (!newColumns.has(col.name)) {
@@ -162,53 +255,37 @@ export async function updateTable(databaseId: string, tableId: string, tableData
 				}
 			}
 
-			// Modify existing columns
-			for (const col of columns) {
-				if (existingColumns.has(col.name)) {
-					const existingCol: any = existingTable.columns.find((c) => c.name === col.name);
-					if (
-						existingCol.dataType !== col.dataType ||
-						existingCol.isNullable !== col.isNullable ||
-						existingCol.defaultValue !== col.defaultValue
-					) {
-						queries.push(
-							`ALTER TABLE ${name} MODIFY COLUMN ${col.name} ${mapDataType(database.type, col.dataType)}${
-								col.isNullable ? '' : ' NOT NULL'
-							}${col.defaultValue ? ` DEFAULT ${col.defaultValue}` : ''}`
-						);
-					}
-				}
+			// Execute the queries
+			for (const query of queries) {
+				await executeQuery(
+					{
+						...existingTable.database,
+						credentials: decryptedCredentials,
+					},
+					query
+				);
 			}
-		} else {
-			// For MongoDB, we'll update the stored schema
-			queries.push(`db.${existingTable.name}.updateMany({}, { $set: ${JSON.stringify(columns)} })`);
-		}
 
-		// Execute the queries on the client's database
-		for (const query of queries) {
-			await executeQuery(database, query);
-		}
-
-		// Update the table information in our database
-		const updatedTable = await prisma.table.update({
-			where: { id: tableId },
-			data: {
-				name,
-				columns: {
-					deleteMany: {},
-					create: columns.map((col) => ({
-						name: col.name,
-						dataType: col.dataType,
-						isNullable: col.isNullable,
-						defaultValue: col.defaultValue,
-					})),
+			// Update the table information in our database
+			const updatedTable = await prisma.table.update({
+				where: { id: tableId },
+				data: {
+					name,
+					columns: {
+						deleteMany: {},
+						create: columns.map((col) => ({
+							name: col.name,
+							dataType: col.dataType,
+							isNullable: col.isNullable,
+							defaultValue: col.defaultValue,
+						})),
+					},
 				},
-			},
-			include: { columns: true },
-		});
+				include: { columns: true },
+			});
 
-		revalidatePath(`/dashboard/databases/${databaseId}/tables`);
-		return { success: true, table: updatedTable };
+			return { success: true, table: updatedTable };
+		}
 	} catch (error: any) {
 		console.error('Failed to update table:', error);
 		return { error: error.message, status: 500 };
@@ -219,7 +296,7 @@ export async function getTables(databaseId: string) {
 	try {
 		const tables = await prisma.table.findMany({
 			where: { databaseId },
-			include: { columns: true },
+			include: { columns: true, apis: true },
 		});
 		return { success: true, tables };
 	} catch (error) {
@@ -228,19 +305,25 @@ export async function getTables(databaseId: string) {
 	}
 }
 
-export async function getTableById(databaseId: string, tableId: string) {
+export async function getTableById(databaseId: string, tableId: string): Promise<TableResult> {
 	try {
-		const table = await prisma.table.findFirst({
+		const table = await prisma.table.findUnique({
 			where: { id: tableId, databaseId },
-			include: { columns: true },
+			include: {
+				columns: true,
+				database: true,
+				apis: true,
+			},
 		});
+
 		if (!table) {
-			return { error: 'Table not found', status: 404 };
+			return { success: false, error: 'Table not found' };
 		}
+
 		return { success: true, table };
 	} catch (error) {
 		console.error('Failed to fetch table:', error);
-		return { error: 'Failed to fetch table', status: 500 };
+		return { success: false, error: 'Failed to fetch table' };
 	}
 }
 
@@ -303,4 +386,19 @@ function mapDataType(databaseType: string, dataType: string): string {
 	};
 
 	return typeMap[databaseType][dataType] || dataType;
+}
+
+function mapMongoDBType(dataType: string): string {
+	switch (dataType) {
+		case 'string':
+			return 'string';
+		case 'number':
+			return 'number';
+		case 'boolean':
+			return 'bool';
+		case 'date':
+			return 'date';
+		default:
+			return 'string';
+	}
 }

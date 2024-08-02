@@ -1,4 +1,3 @@
-// app/dashboard/databases/[databaseId]/tables/page.tsx
 'use client';
 
 import { useState, useEffect } from 'react';
@@ -54,7 +53,7 @@ export default function TablesPage({ params }: { params: { id: string } }) {
 					</Link>
 				</div>
 			</div>
-			<TableList tables={tables} databaseId={params.id} />
+			<TableList databaseId={params.id} initialTables={tables} />
 		</div>
 	);
 }

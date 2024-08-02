@@ -101,8 +101,10 @@ function HomePage() {
 							<div className='text-xl font-bold'>
 								{databases?.length} Active {databases?.length > 1 ? 'Databases' : 'Database'}
 							</div>
-							{databases.length > 1 && databaseStrings.length > 0 && (
+							{databases.length > 1 && databaseStrings.length > 0 ? (
 								<p className='text-xs text-muted-foreground'>{formattedDatabaseCount}</p>
+							) : (
+								<p className='text-xs text-muted-foreground'>No databases</p>
 							)}
 						</CardContent>
 					</Card>

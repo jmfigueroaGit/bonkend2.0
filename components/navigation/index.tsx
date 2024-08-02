@@ -22,7 +22,9 @@ const Navigation = () => {
 		<div className='top-0 right-0 left-0 p-4 flex items-center justify-between z-10'>
 			<aside className='flex items-center gap-2'>
 				<Link href='/' className='text-xl font-bold cursor-pointer flex items-center space-x-2'>
-					<Image src='/logo.svg' alt='Bonkend' width={80} height={10} />
+					<div className='relative w-20 h-5'>
+						<Image src='/logo.svg' alt='Bonkend' fill style={{ objectFit: 'contain' }} />
+					</div>
 					<span>Bonkend.</span>
 				</Link>
 			</aside>

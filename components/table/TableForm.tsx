@@ -1,6 +1,6 @@
 // components/table/TableForm.tsx
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useForm, useFieldArray } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import * as z from 'zod';
@@ -41,10 +41,10 @@ export function TableForm({ initialData, databaseId, databaseType, tableId = nul
 
 	const form = useForm<z.infer<typeof TableSchema>>({
 		resolver: zodResolver(TableSchema),
-		defaultValues: initialData || {
-			name: '',
-			idType: databaseType !== 'mongodb' ? 'auto_increment' : undefined,
-			columns: [{ name: '', dataType: 'string', isNullable: true }],
+		defaultValues: {
+			name: initialData?.name || '',
+			idType: databaseType !== 'mongodb' ? initialData?.idType || 'auto_increment' : undefined,
+			columns: initialData?.columns || [{ name: '', dataType: 'string', isNullable: true, defaultValue: '' }],
 		},
 	});
 
@@ -56,7 +56,7 @@ export function TableForm({ initialData, databaseId, databaseType, tableId = nul
 	const onSubmit = async (data: z.infer<typeof TableSchema>) => {
 		setIsSubmitting(true);
 		try {
-			let result;
+			let result: any;
 
 			if (tableId) {
 				result = await updateTable(databaseId, tableId, data);
@@ -78,6 +78,7 @@ export function TableForm({ initialData, databaseId, databaseType, tableId = nul
 				});
 			}
 		} catch (error) {
+			console.log(error);
 			toast({
 				title: 'Error',
 				description: 'An unexpected error occurred',
@@ -112,7 +113,7 @@ export function TableForm({ initialData, databaseId, databaseType, tableId = nul
 						render={({ field }) => (
 							<FormItem>
 								<FormLabel>ID Type</FormLabel>
-								<Select onValueChange={field.onChange} defaultValue={field.value}>
+								<Select onValueChange={field.onChange} value={field.value}>
 									<FormControl>
 										<SelectTrigger>
 											<SelectValue placeholder='Select ID type' />
@@ -135,7 +136,10 @@ export function TableForm({ initialData, databaseId, databaseType, tableId = nul
 				))}
 
 				<div className='flex justify-between'>
-					<Button type='button' onClick={() => append({ name: '', dataType: 'string', isNullable: true })}>
+					<Button
+						type='button'
+						onClick={() => append({ name: '', dataType: 'string', isNullable: true, defaultValue: '' })}
+					>
 						Add Column
 					</Button>
 
