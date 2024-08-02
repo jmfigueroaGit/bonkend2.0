@@ -16,5 +16,5 @@ export default withAuth(
 );
 
 export const config = {
-	matcher: ['/', '/dashboard', '/profile', '/databases'],
+	matcher: ['/', '/dashboard', '/profile', '/databases', '/endpoints', '/endpoints/*', '/api-tester'],
 };
