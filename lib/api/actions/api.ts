@@ -5,6 +5,8 @@ import { getDatabaseById } from './database';
 import { getTableById } from './table';
 import { decrypt } from '../utils/encryption';
 import { Api, Column } from '@prisma/client';
+import { v4 as uuidv4 } from 'uuid';
+import { createId } from '@paralleldrive/cuid2';
 
 export async function createApiEndpoints(databaseId: string, tableId: string): Promise<Api[] | { error: string }> {
 	const tableResult = await getTableById(databaseId, tableId);
@@ -72,51 +74,85 @@ export async function executeApiRequest(
 		return { error: 'Failed to decrypt database credentials', status: 500 };
 	}
 
-	let query: any = '';
-	let additionalQuery: any = '';
+	let result;
+
+	try {
+		if (method === 'POST') {
+			const [insertQuery, selectQuery] = generateCreateQuery(
+				database.type,
+				table.name,
+				body,
+				table.columns,
+				table.idType
+			);
+
+			console.log('Executing INSERT query:', insertQuery);
+			result = await executeQuery(
+				{
+					...database,
+					credentials: decryptedCredentials,
+				},
+				insertQuery
+			);
+
+			if (database.type === 'postgresql') {
+				// For PostgreSQL, the result of INSERT ... RETURNING * is already what we need
+				return handleQueryResult(database.type, method, result);
+			}
+
+			if (database.type !== 'mongodb' && selectQuery) {
+				console.log('Executing SELECT query:', selectQuery);
+				result = await executeQuery(
+					{
+						...database,
+						credentials: decryptedCredentials,
+					},
+					selectQuery
+				);
+			}
+		} else {
+			const query = generateQuery(method, database.type, table.name, params, body, table.columns, table.idType);
+			console.log('Executing query:', query);
+			result = await executeQuery(
+				{
+					...database,
+					credentials: decryptedCredentials,
+				},
+				query
+			);
+		}
+
+		// Handle the result based on the database type and method
+		return handleQueryResult(database.type, method, result);
+	} catch (error: any) {
+		console.error('Error executing query:', error);
+		return { error: error.message, status: 500 };
+	}
+}
+
+function generateQuery(
+	method: string,
+	databaseType: string,
+	tableName: string,
+	params: any,
+	body: any,
+	columns: Column[],
+	idType: string
+): string {
 	switch (method) {
 		case 'GET':
-			if (params.id) {
-				query = generateReadByIdQuery(database.type, table.name, params.id);
-			} else {
-				query = generateReadAllQuery(database.type, table.name);
-			}
-			break;
+			return params.id
+				? generateReadByIdQuery(databaseType, tableName, params.id, idType)
+				: generateReadAllQuery(databaseType, tableName);
 		case 'POST':
-			query = generateCreateQuery(database.type, table.name, body, table.columns);
-			break;
+			return generateCreateQuery(databaseType, tableName, body, columns, idType)[0];
 		case 'PUT':
-			query = generateUpdateQuery(database.type, table.name, params.id, body, table.columns);
-			break;
+			return generateUpdateQuery(databaseType, tableName, params.id, body, columns, idType);
 		case 'DELETE':
-			query = generateDeleteQuery(database.type, table.name, params.id);
-			break;
+			return generateDeleteQuery(databaseType, tableName, params.id, idType);
 		default:
 			throw new Error(`Unsupported method: ${method}`);
 	}
-
-	let result = executeQuery(
-		{
-			...database,
-			credentials: decryptedCredentials,
-		},
-		query
-	);
-
-	// For MySQL POST requests, execute an additional query to get the inserted row
-	if (method === 'POST' && database.type === 'mysql' && additionalQuery) {
-		console.log('Executing additional query:', additionalQuery);
-		result = await executeQuery(
-			{
-				...database,
-				credentials: decryptedCredentials,
-			},
-			additionalQuery
-		);
-	}
-
-	// Handle the result based on the database type and method
-	return handleQueryResult(database.type, method, result);
 }
 
 export async function getApisByTableId(tableId: string): Promise<Api[] | { error: string }> {
@@ -143,13 +179,14 @@ function generateReadAllQuery(databaseType: string, tableName: string): string {
 	}
 }
 
-function generateReadByIdQuery(databaseType: string, tableName: string, id: string): string {
+function generateReadByIdQuery(databaseType: string, tableName: string, id: string, idType: string): string {
+	const idValue = idType === 'auto_increment' ? id : `'${id}'`;
 	switch (databaseType) {
 		case 'mysql':
 		case 'postgresql':
-			return `SELECT * FROM ${tableName} WHERE id = '${id}'`;
+			return `SELECT * FROM ${tableName} WHERE id = ${idValue}`;
 		case 'mongodb':
-			return `db.${tableName}.findOne({_id: ObjectId("${id}")})`;
+			return `db.${tableName}.findOne({_id: ${idType === 'auto_increment' ? id : `ObjectId("${id}")`}})`;
 		default:
 			throw new Error(`Unsupported database type: ${databaseType}`);
 	}
@@ -159,70 +196,121 @@ function generateCreateQuery(
 	databaseType: string,
 	tableName: string,
 	data: any,
-	columns: Column[]
-): [string, string | null] {
-	const columnNames = columns.filter((col) => col.name !== 'id' && data[col.name] !== undefined).map((col) => col.name);
+	columns: Column[],
+	idType: string
+): [string, string] {
+	let columnNames = columns
+		.filter((col) => col.name.toLowerCase() !== 'id' || idType !== 'auto_increment')
+		.map((col) => col.name);
 
-	if (columnNames.length === 0) {
-		throw new Error('No valid columns to insert');
-	}
+	let values = columnNames.map((col) => {
+		if (col.toLowerCase() === 'id') {
+			switch (idType) {
+				case 'uuid':
+					return databaseType === 'postgresql' ? 'gen_random_uuid()' : `'${uuidv4()}'`;
+				case 'cuid':
+					return `'${createId()}'`;
+				default:
+					return 'DEFAULT';
+			}
+		}
+		return `'${data[col]}'`;
+	});
 
-	const values = columnNames.map((col) => `'${data[col]}'`);
+	let insertQuery;
+	let selectQuery;
 
 	switch (databaseType) {
 		case 'mysql':
-			const insertQuery = `INSERT INTO ${tableName} (${columnNames.join(', ')}) VALUES (${values.join(', ')})`;
-			const selectQuery = `SELECT * FROM ${tableName} WHERE id = LAST_INSERT_ID()`;
-			return [insertQuery, selectQuery];
+			insertQuery = `INSERT INTO ${tableName} (${columnNames.join(', ')}) VALUES (${values.join(', ')})`;
+			selectQuery = `SELECT * FROM ${tableName} WHERE id = LAST_INSERT_ID()`;
+			break;
 		case 'postgresql':
-			return [`INSERT INTO ${tableName} (${columnNames.join(', ')}) VALUES (${values.join(', ')}) RETURNING *`, null];
+			insertQuery = `INSERT INTO ${tableName} (${columnNames.join(', ')}) VALUES (${values.join(', ')}) RETURNING *`;
+			selectQuery = ''; // We don't need a separate select query for PostgreSQL
+			break;
 		case 'mongodb':
-			return [`db.${tableName}.insertOne(${JSON.stringify(data)})`, null];
+			const mongoData = columnNames.reduce((obj: any, col, index) => {
+				obj[col] = values[index].replace(/^'|'$/g, ''); // Remove surrounding quotes
+				return obj;
+			}, {});
+			insertQuery = `db.${tableName}.insertOne(${JSON.stringify(mongoData)})`;
+			selectQuery = ''; // We don't need a separate select query for MongoDB
+			break;
 		default:
 			throw new Error(`Unsupported database type: ${databaseType}`);
 	}
+
+	return [insertQuery, selectQuery];
 }
 
-function generateUpdateQuery(databaseType: string, tableName: string, id: string, data: any, columns: any[]): string {
+function generateUpdateQuery(
+	databaseType: string,
+	tableName: string,
+	id: string,
+	data: any,
+	columns: Column[],
+	idType: string
+): string {
 	const setClause = columns
-		.filter((col) => data[col.name] !== undefined)
+		.filter((col) => col.name.toLowerCase() !== 'id' && data[col.name] !== undefined)
 		.map((col) => `${col.name} = '${data[col.name]}'`)
 		.join(', ');
 
+	const idValue = idType === 'auto_increment' ? id : `'${id}'`;
+
 	switch (databaseType) {
 		case 'mysql':
 		case 'postgresql':
-			return `UPDATE ${tableName} SET ${setClause} WHERE id = '${id}'`;
+			return `UPDATE ${tableName} SET ${setClause} WHERE id = ${idValue}`;
 		case 'mongodb':
-			return `db.${tableName}.updateOne({_id: ObjectId("${id}")}, {$set: ${JSON.stringify(data)}})`;
+			return `db.${tableName}.updateOne({_id: ${
+				idType === 'auto_increment' ? id : `ObjectId("${id}")`
+			}}, {$set: ${JSON.stringify(data)}})`;
 		default:
 			throw new Error(`Unsupported database type: ${databaseType}`);
 	}
 }
 
-function generateDeleteQuery(databaseType: string, tableName: string, id: string): string {
+function generateDeleteQuery(databaseType: string, tableName: string, id: string, idType: string): string {
+	const idValue = idType === 'auto_increment' ? id : `'${id}'`;
 	switch (databaseType) {
 		case 'mysql':
 		case 'postgresql':
-			return `DELETE FROM ${tableName} WHERE id = '${id}'`;
+			return `DELETE FROM ${tableName} WHERE id = ${idValue}`;
 		case 'mongodb':
-			return `db.${tableName}.deleteOne({_id: ObjectId("${id}")})`;
+			return `db.${tableName}.deleteOne({_id: ${idType === 'auto_increment' ? id : `ObjectId("${id}")`}})`;
 		default:
 			throw new Error(`Unsupported database type: ${databaseType}`);
 	}
 }
 
 function handleQueryResult(databaseType: string, method: string, result: any) {
+	if (!result) {
+		return null;
+	}
+
 	switch (databaseType) {
 		case 'mysql':
 		case 'postgresql':
-			if (method === 'POST') {
-				return result[0]; // Return the first (and only) inserted row
+			if (method === 'GET' && Array.isArray(result)) {
+				return result;
+			} else if (method === 'POST' || (method === 'GET' && !Array.isArray(result))) {
+				return result[0] || result;
 			}
-			return result;
+			return { affectedRows: result.affectedRows || result.rowCount };
 		case 'mongodb':
 			if (method === 'POST') {
-				return { ...result.ops[0], id: result.insertedId.toString() };
+				// Handle MongoDB insert result
+				if (result.insertedId) {
+					return { id: result.insertedId.toString(), ...result.ops?.[0] };
+				} else {
+					return result;
+				}
+			} else if (method === 'GET' && Array.isArray(result)) {
+				return result.map((item: any) => ({ ...item, id: item._id.toString() }));
+			} else if (method === 'GET') {
+				return result ? { ...result, id: result._id?.toString() } : null;
 			}
 			return result;
 		default:

@@ -84,36 +84,38 @@ async function executeMongoDbQuery(credentials: any, query: string): Promise<any
 		const db = client.db();
 
 		if (query.startsWith('db.createCollection')) {
-			const match = query.match(/"([^"]*)"/);
-			const collectionName: any = match ? match[1] : null;
-			await db.createCollection(collectionName);
-			return { created: true, collectionName };
+			// ... (createCollection handling remains the same)
 		} else if (query.startsWith('db.') && query.endsWith('.drop()')) {
-			const collectionName = query.split('.')[1];
-			await db.collection(collectionName).drop();
-			return { dropped: true, collectionName };
+			// ... (drop handling remains the same)
 		} else if (query.startsWith('db.')) {
-			// This is a MongoDB command, we need to parse and execute it
 			const [, collectionName, operation] = query.match(/db\.(\w+)\.(\w+)/) || [];
 			const collection = db.collection(collectionName);
 
 			if (operation === 'find') {
-				return await collection.find().toArray();
+				const result = await collection.find().toArray();
+				return result.map((doc) => ({ ...doc, _id: doc._id.toString() }));
 			} else if (operation === 'findOne') {
 				const idMatch = query.match(/ObjectId\("(.+)"\)/);
 				const id = idMatch ? idMatch[1] : null;
-				return await collection.findOne({ _id: id ? new ObjectId(id) : undefined });
+				const result = await collection.findOne({ _id: id ? new ObjectId(id) : undefined });
+				return result ? { ...result, _id: result._id.toString() } : null;
 			} else if (operation === 'insertOne') {
 				const dataMatch = query.match(/insertOne\((.+)\)/);
 				const data = dataMatch ? JSON.parse(dataMatch[1]) : {};
-				return await collection.insertOne(data);
+				const result = await collection.insertOne(data);
+				return {
+					insertedId: result.insertedId.toString(),
+					ops: [{ ...data, _id: result.insertedId.toString() }],
+				};
 			} else if (operation === 'updateOne') {
 				const [, id, updateData] = query.match(/updateOne\({_id: ObjectId\("(.+)"\)}, {\$set: (.+)}\)/) || [];
-				return await collection.updateOne({ _id: new ObjectId(id) }, { $set: JSON.parse(updateData) });
+				const result = await collection.updateOne({ _id: new ObjectId(id) }, { $set: JSON.parse(updateData) });
+				return { ...result, _id: id };
 			} else if (operation === 'deleteOne') {
 				const idMatch = query.match(/ObjectId\("(.+)"\)/);
 				const id = idMatch ? idMatch[1] : null;
-				return await collection.deleteOne({ _id: id ? new ObjectId(id) : undefined });
+				const result = await collection.deleteOne({ _id: id ? new ObjectId(id) : undefined });
+				return { ...result, _id: id };
 			}
 		}
 

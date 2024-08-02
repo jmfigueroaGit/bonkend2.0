@@ -120,6 +120,7 @@ const ApiTester = () => {
 				JSON.parse(body || '{}'),
 				headerObject
 			);
+
 			setResponse(result);
 		} catch (error: any) {
 			setResponse({ error: error.message });

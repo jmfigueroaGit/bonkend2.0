@@ -78,16 +78,20 @@ export async function createTable(
 			console.log('MongoDB query:', query);
 		} else {
 			const { name, idType, columns } = SqlTableSchema.parse(tableData);
+
+			// Ensure the id column is first and properly set up
 			const idColumn = getIdColumnDefinition(database.type, idType);
-			const columnDefinitions = columns.map(
+			const otherColumnDefinitions = columns.map(
 				(col) =>
 					`${col.name} ${mapDataType(database.type, col.dataType)}${col.isNullable ? '' : ' NOT NULL'}${
 						col.defaultValue ? ` DEFAULT ${col.defaultValue}` : ''
 					}`
 			);
 
-			columnDefinitions.unshift(idColumn);
-			query = `CREATE TABLE ${name} (${columnDefinitions.join(', ')})`;
+			const allColumnDefinitions = [idColumn, ...otherColumnDefinitions];
+			query = `CREATE TABLE ${name} (${allColumnDefinitions.join(', ')})`;
+
+			console.log('SQL query:', query);
 
 			if (idType === 'uuid') {
 				tableId = uuidv4();
@@ -100,6 +104,12 @@ export async function createTable(
 
 		await executeQuery(database, query);
 
+		// For SQL databases with auto-increment, get the last inserted ID
+		if (database.type !== 'mongodb' && !tableId) {
+			const idResult = await executeQuery(database, 'SELECT LAST_INSERT_ID() as id');
+			tableId = idResult[0].id;
+		}
+
 		// Store the table information in our database
 		const table = await prisma.table.create({
 			data: {
@@ -107,12 +117,20 @@ export async function createTable(
 				databaseId,
 				idType: database.type === 'mongodb' ? 'mongodb_id' : (tableData as z.infer<typeof SqlTableSchema>).idType,
 				columns: {
-					create: tableData.columns.map((col) => ({
-						name: col.name,
-						dataType: col.dataType,
-						isNullable: col.isNullable,
-						defaultValue: col.defaultValue,
-					})),
+					create: [
+						{
+							name: 'id',
+							dataType: database.type === 'mongodb' ? 'string' : (tableData as z.infer<typeof SqlTableSchema>).idType,
+							isNullable: false,
+							defaultValue: null,
+						},
+						...tableData.columns.map((col) => ({
+							name: col.name,
+							dataType: col.dataType,
+							isNullable: col.isNullable,
+							defaultValue: col.defaultValue,
+						})),
+					],
 				},
 			},
 			include: { columns: true, database: true },
