@@ -9,12 +9,16 @@ export function generateServerFile(format: 'javascript' | 'typescript', tables: 
 import { PrismaClient } from '@prisma/client';
 import cors from 'cors';
 import routes from './routes';
-import { errorHandler } from './middleware/errorHandler';`
+import { errorHandler } from './middleware/errorHandler';
+require('dotenv').config();
+`
 			: `const express = require('express');
 const { PrismaClient } = require('@prisma/client');
 const cors = require('cors');
 const routes = require('./routes');
-const { errorHandler } = require('./middleware/errorHandler');`;
+const { errorHandler } = require('./middleware/errorHandler');
+require('dotenv').config();
+`;
 
 	const serverContent = `
 ${imports}

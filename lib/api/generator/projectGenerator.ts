@@ -3,11 +3,13 @@
 'use server';
 
 import { Database, Table, Api, Column } from '@prisma/client';
-import { generateRoutesFiles } from './routesGenerator';
+import { convertUrlPath, generateRoutesFiles } from './routesGenerator';
 import { generateServerFile } from './serverGenerator';
 import { generateEnvFile } from './envGenerator';
 import { generateReadme } from './readmeGenerator';
 import { generateGitignore } from './gitignore';
+import { generatePrismaClientConfig } from './prismaClientConfigGenerator';
+import { generateFuctionName } from '../utils/generator';
 
 export async function generateProject(
 	database: Database,
@@ -27,7 +29,7 @@ export async function generateProject(
 	Object.assign(files, routeFiles);
 
 	// Generate controller files
-	const controllerFiles = generateControllerFiles(tables, apis, format);
+	const controllerFiles = generateControllerFiles(tables, apis, columns, format);
 	Object.assign(files, controllerFiles);
 
 	// Generate error handler file
@@ -35,6 +37,9 @@ export async function generateProject(
 
 	// Generate Prisma schema
 	files['prisma/schema.prisma'] = generatePrismaSchema(database, tables, columns);
+
+	// Generate Prisma client configuration
+	files[`config/prisma.${ext}`] = generatePrismaClientConfig(format);
 
 	// Generate package.json
 	files['package.json'] = generatePackageJson(format, database.name);
@@ -46,7 +51,9 @@ export async function generateProject(
 	files['.gitignore'] = generateGitignore();
 
 	// Generate .env file
-	files['.env'] = generateEnvFile(database);
+	const envContent = generateEnvFile(database);
+	files['.env'] = envContent;
+	files['.env.example'] = envContent.replace(/=.*/g, '=your_value_here');
 
 	// Generate tsconfig.json if TypeScript
 	if (format === 'typescript') {
@@ -59,6 +66,7 @@ export async function generateProject(
 function generateControllerFiles(
 	tables: Table[],
 	apis: Api[],
+	columns: Column[],
 	format: 'javascript' | 'typescript'
 ): { [filename: string]: string } {
 	const controllerFiles: { [filename: string]: string } = {};
@@ -66,24 +74,30 @@ function generateControllerFiles(
 
 	tables.forEach((table) => {
 		const tableApis = apis.filter((api) => api.tableId === table.id);
-		const controllerContent = generateControllerFileContent(table, tableApis, format);
+		const controllerContent = generateControllerFileContent(table, tableApis, columns, format);
 		controllerFiles[`controllers/${table.name.toLowerCase()}Controller.${ext}`] = controllerContent;
 	});
 
 	return controllerFiles;
 }
 
-function generateControllerFileContent(table: Table, apis: Api[], format: 'javascript' | 'typescript'): string {
+function generateControllerFileContent(
+	table: Table,
+	apis: Api[],
+	columns: Column[],
+	format: 'javascript' | 'typescript'
+): string {
 	const imports =
 		format === 'typescript'
-			? `import { Request, Response } from 'express';\nimport { PrismaClient } from '@prisma/client';`
-			: `const { PrismaClient } = require('@prisma/client');`;
-
-	const prismaDeclaration = `const prisma = new PrismaClient();`;
+			? `import { Request, Response, NextFunction } from 'express';
+import prisma from '../config/prisma';
+import { AppError, errorResponse } from '../middleware/errorHandler';`
+			: `const prisma = require('../config/prisma');
+const { AppError, errorResponse } = require('../middleware/errorHandler');`;
 
 	const methods = apis
 		.map((api) => {
-			const methodName = `${api.method.toLowerCase()}${capitalize(table.name)}`;
+			const methodName = generateFuctionName(api.path, api.method);
 			const params = format === 'typescript' ? '(req: Request, res: Response)' : '(req, res)';
 
 			return `
@@ -91,10 +105,11 @@ function generateControllerFileContent(table: Table, apis: Api[], format: 'javas
     try {
       // Implement the logic for ${api.name} here
       // This is a placeholder implementation
-      const result = await prisma.${table.name.toLowerCase()}.findMany();
-      res.json(result);
+      ${generateMethodContent(api, table)}
+
     } catch (error) {
-      res.status(500).json({ error: 'An error occurred' });
+	  if(process.env.NODE_ENV === 'development') console.error(error);
+      res.status(500).json({ error: 'An error occurred: ', error });
     }
   }`;
 		})
@@ -102,18 +117,70 @@ function generateControllerFileContent(table: Table, apis: Api[], format: 'javas
 
 	const exports =
 		format === 'typescript'
-			? `export { ${apis.map((api) => `${api.method.toLowerCase()}${capitalize(table.name)}`).join(', ')} };`
-			: `module.exports = { ${apis.map((api) => `${api.method.toLowerCase()}${capitalize(table.name)}`).join(', ')} };`;
+			? `export { ${apis.map((api) => `${generateFuctionName(api.path, api.method)}`).join(', ')} };`
+			: `module.exports = { ${apis.map((api) => `${generateFuctionName(api.path, api.method)}`).join(', ')} };`;
 
+	console.log(methods);
 	return `
   ${imports}
   
-  ${prismaDeclaration}
   
   ${methods}
   
   ${exports}
     `.trim();
+}
+
+function generateMethodContent(api: Api, table: Table): string {
+	const lowercaseTableName = table.name.toLowerCase();
+	switch (api.method) {
+		case 'GET':
+			if (api.path.includes('{id}')) {
+				return `
+	  const { id } = req.params;
+	  const result = await prisma.${lowercaseTableName}.findUnique({
+		where: { id: ${table.idType === 'auto_increment' ? 'parseInt(id)' : 'id'} }
+	  });
+	  if (!result) {
+		throw new AppError('${capitalize(table.name)} not found', 404);
+	  }
+	  res.status(200).json(result);`;
+			} else {
+				return `
+	  const results = await prisma.${lowercaseTableName}.findMany();
+	  res.status(200).json(results);`;
+			}
+		case 'POST':
+			return `
+	  const data = req.body;
+	  const result = await prisma.${lowercaseTableName}.create({ data });
+	  res.status(201).json(result);`;
+		case 'PUT':
+			return `
+	  const { id } = req.params;
+	  const data = req.body;
+	  const result = await prisma.${lowercaseTableName}.update({
+		where: { id: ${table.idType === 'auto_increment' ? 'parseInt(id)' : 'id'} },
+		data
+	  });
+	  if (!result) {
+		throw new AppError('${capitalize(table.name)} not found', 404);
+	  }
+	  res.status(200).json(result);`;
+		case 'DELETE':
+			return `
+	  const { id } = req.params;
+	  const result = await prisma.${lowercaseTableName}.delete({
+		where: { id: ${table.idType === 'auto_increment' ? 'parseInt(id)' : 'id'} }
+	  });
+	  if (!result) {
+		throw new AppError('${capitalize(table.name)} not found', 404);
+	  }
+	  res.status(204).send({message: 'Deleted successfully'});`;
+		default:
+			return `
+	  throw new AppError('Method not implemented', 501);`;
+	}
 }
 
 function generatePrismaSchema(database: Database, tables: Table[], columns: Column[]): string {
@@ -191,6 +258,10 @@ function mapDataType(dataType: string): string {
 }
 
 function generatePackageJson(format: 'javascript' | 'typescript', projectName: string): string {
+	const npmPackages =
+		format === 'typescript'
+			? 'npm i -D @types/cors @types/express @types/node nodemon prisma ts-node-dev typescript && npm install @prisma/client cors dotenv express'
+			: 'npm install @prisma/client cors dotenv express && npm install -D nodemon prisma';
 	return JSON.stringify(
 		{
 			name: projectName,
@@ -204,22 +275,10 @@ function generatePackageJson(format: 'javascript' | 'typescript', projectName: s
 				'prisma:generate': 'prisma generate',
 				'prisma:migrate': 'prisma migrate dev',
 				'prisma:studio': 'prisma studio',
+				setup: `${npmPackages} && npm run prisma:migrate && npm run prisma:generate && npm run dev`,
 			},
-			dependencies: {
-				'@prisma/client': '^4.0.0',
-				cors: '^2.8.5',
-				dotenv: '^16.0.0',
-				express: '^4.18.2',
-			},
-			devDependencies: {
-				'@types/cors': format === 'typescript' ? '^2.8.13' : undefined,
-				'@types/express': format === 'typescript' ? '^4.17.17' : undefined,
-				'@types/node': format === 'typescript' ? '^18.15.11' : undefined,
-				nodemon: '^2.0.22',
-				prisma: '^4.0.0',
-				'ts-node-dev': format === 'typescript' ? '^2.0.0' : undefined,
-				typescript: format === 'typescript' ? '^5.0.3' : undefined,
-			},
+			dependencies: {},
+			devDependencies: {},
 		},
 		null,
 		2
@@ -245,76 +304,96 @@ function generateTsConfig(): string {
 }
 
 function generateErrorHandlerFile(format: 'javascript' | 'typescript'): string {
-	// Content of the error handler file
+	const typeAnnotations =
+		format === 'typescript'
+			? `: {
+	  message: string;
+	  status: string;
+	  statusCode: number;
+	  isOperational?: boolean;
+	  stack?: string;
+	}`
+			: '';
+
 	return `
   ${format === 'typescript' ? "import { Request, Response, NextFunction } from 'express';" : ''}
   
   class AppError extends Error {
-    ${
-			format === 'typescript'
-				? `
-    statusCode: number;
-    status: string;
-    isOperational: boolean;
-    `
-				: ''
-		}
+	${
+		format === 'typescript'
+			? `
+	statusCode: number;
+	status: string;
+	isOperational: boolean;
+	`
+			: ''
+	}
   
-    constructor(message${format === 'typescript' ? ': string' : ''}, statusCode${
+	constructor(message${format === 'typescript' ? ': string' : ''}, statusCode${
 		format === 'typescript' ? ': number' : ''
 	}) {
-      super(message);
-      this.statusCode = statusCode;
-      this.status = \`\${statusCode}\`.startsWith('4') ? 'fail' : 'error';
-      this.isOperational = true;
+	  super(message);
+	  this.statusCode = statusCode;
+	  this.status = \`\${statusCode}\`.startsWith('4') ? 'fail' : 'error';
+	  this.isOperational = true;
   
-      Error.captureStackTrace(this, this.constructor);
-    }
+	  Error.captureStackTrace(this, this.constructor);
+	}
+  }
+  
+  function errorResponse(err${typeAnnotations}) {
+	return {
+	  success: false,
+	  error: {
+		message: err.message,
+		status: err.status,
+		statusCode: err.statusCode,
+		...(process.env.NODE_ENV === 'development' && { stack: err.stack })
+	  }
+	};
   }
   
   const errorHandler = (err${format === 'typescript' ? ': AppError' : ''}, req${
 		format === 'typescript' ? ': Request' : ''
 	}, res${format === 'typescript' ? ': Response' : ''}, next${format === 'typescript' ? ': NextFunction' : ''}) => {
-    err.statusCode = err.statusCode || 500;
-    err.status = err.status || 'error';
+	err.statusCode = err.statusCode || 500;
+	err.status = err.status || 'error';
   
-    if (process.env.NODE_ENV === 'development') {
-      sendErrorDev(err, res);
-    } else if (process.env.NODE_ENV === 'production') {
-      sendErrorProd(err, res);
-    }
+	if (process.env.NODE_ENV === 'development') {
+	  sendErrorDev(err, res);
+	} else if (process.env.NODE_ENV === 'production') {
+	  sendErrorProd(err, res);
+	}
   };
   
   const sendErrorDev = (err${format === 'typescript' ? ': AppError' : ''}, res${
 		format === 'typescript' ? ': Response' : ''
 	}) => {
-    res.status(err.statusCode).json({
-      status: err.status,
-      error: err,
-      message: err.message,
-      stack: err.stack
-    });
+	res.status(err.statusCode).json(errorResponse(err));
   };
   
   const sendErrorProd = (err${format === 'typescript' ? ': AppError' : ''}, res${
 		format === 'typescript' ? ': Response' : ''
 	}) => {
-    if (err.isOperational) {
-      res.status(err.statusCode).json({
-        status: err.status,
-        message: err.message
-      });
-    } else {
-      console.error('ERROR 💥', err);
-      res.status(500).json({
-        status: 'error',
-        message: 'Something went very wrong!'
-      });
-    }
+	if (err.isOperational) {
+	  res.status(err.statusCode).json(errorResponse(err));
+	} else {
+	  console.error('ERROR 💥', err);
+	  res.status(500).json(errorResponse({
+		message: 'Something went very wrong!',
+		status: 'error',
+		statusCode: 500,
+		isOperational: false
+	  }));
+	}
   };
   
-  ${format === 'typescript' ? 'export { AppError, errorHandler };' : 'module.exports = { AppError, errorHandler };'}
-    `.trim();
+  ${
+		format === 'typescript'
+			? 'export { AppError, errorHandler, errorResponse };'
+			: 'module.exports = { AppError, errorHandler, errorResponse };'
+	}
+  `.trim();
 }
 
 function capitalize(s: string): string {

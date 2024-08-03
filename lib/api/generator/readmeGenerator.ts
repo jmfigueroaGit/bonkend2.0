@@ -11,7 +11,7 @@ export function generateReadme(projectName: string, databaseType: string): strin
   1. **Install Dependencies**
      Run the following command to install all necessary dependencies:
      \`\`\`
-     npm install
+     npm run setup
      \`\`\`
   
   2. **Environment Setup**

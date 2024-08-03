@@ -1,7 +1,7 @@
 // lib/generators/envGenerator.ts
 
 export function generateEnvFile(database: any): string {
-	let envContent = `PORT=3000
+	let envContent = `PORT=5000
 NODE_ENV=development
 `;
 

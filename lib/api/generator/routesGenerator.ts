@@ -1,6 +1,7 @@
 // lib/generators/routesGenerator.ts
 
 import { Api as ApiEndpoint, Table } from '@prisma/client';
+import { generateFuctionName } from '../utils/generator';
 
 export function generateRoutesFiles(
 	tables: Table[],
@@ -37,11 +38,13 @@ const ${tableName}Controller = require('../controllers/${tableName.toLowerCase()
 
 	const routes = endpoints
 		.map((endpoint) => {
-			const { method, path, name } = endpoint;
-			const controllerMethod = `${method.toLowerCase()}${capitalize(tableName)}`;
+			const { method, path } = endpoint;
+			const controllerMethod = generateFuctionName(path, method);
 			return `router.${method.toLowerCase()}('${convertUrlPath(path)}', ${tableName}Controller.${controllerMethod});`;
 		})
 		.join('\n');
+
+	console.log(routes);
 
 	const exportStatement = format === 'typescript' ? `export default router;` : `module.exports = router;`;
 
@@ -91,7 +94,7 @@ function capitalize(s: string): string {
 	return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
-function convertUrlPath(url: string): string {
+export function convertUrlPath(url: string): string {
 	// Split the URL into segments
 	const segments: any = url.split('/');
 
