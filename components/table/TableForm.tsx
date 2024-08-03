@@ -1,6 +1,4 @@
-// components/table/TableForm.tsx
-
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useForm, useFieldArray } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import * as z from 'zod';
@@ -44,7 +42,9 @@ export function TableForm({ initialData, databaseId, databaseType, tableId = nul
 		defaultValues: {
 			name: initialData?.name || '',
 			idType: databaseType !== 'mongodb' ? initialData?.idType || 'auto_increment' : undefined,
-			columns: initialData?.columns || [{ name: '', dataType: 'string', isNullable: true, defaultValue: '' }],
+			columns: initialData?.columns?.filter((col) => col.name !== 'id') || [
+				{ name: '', dataType: 'string', isNullable: true, defaultValue: '' },
+			],
 		},
 	});
 
@@ -106,7 +106,7 @@ export function TableForm({ initialData, databaseId, databaseType, tableId = nul
 					)}
 				/>
 
-				{databaseType !== 'mongodb' && (
+				{databaseType !== 'mongodb' && !tableId && (
 					<FormField
 						control={form.control}
 						name='idType'

@@ -84,9 +84,14 @@ async function executeMongoDbQuery(credentials: any, query: string): Promise<any
 		const db = client.db();
 
 		if (query.startsWith('db.createCollection')) {
-			// ... (createCollection handling remains the same)
+			const match = query.match(/"([^"]*)"/);
+			const collectionName: any = match ? match[1] : null;
+			await db.createCollection(collectionName);
+			return { created: true, collectionName };
 		} else if (query.startsWith('db.') && query.endsWith('.drop()')) {
-			// ... (drop handling remains the same)
+			const collectionName = query.split('.')[1];
+			await db.collection(collectionName).drop();
+			return { dropped: true, collectionName };
 		} else if (query.startsWith('db.')) {
 			const [, collectionName, operation] = query.match(/db\.(\w+)\.(\w+)/) || [];
 			const collection = db.collection(collectionName);
